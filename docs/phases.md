@@ -2,7 +2,7 @@
 ## From Zero to Production: The Complete Code-Level Implementation Guide
 
 > **Source Architecture:** `KARAM_GENESIS_FINAL.md`  
-> **Target:** KaramLLM v3 "Genesis" — 209M parameters, M1 MacBook Air  
+> **Target:** KaramLLM v3 "Genesis" — 202M parameters, M1 MacBook Air  
 > **Language:** Python 3.11 + PyTorch 2.3 (MPS backend)  
 > **Status:** IMPLEMENTATION READY
 
@@ -359,7 +359,7 @@ class RMSNorm(nn.Module):
 """
 Grouped Query Attention (GQA) with:
   • RoPE positional encoding (applied to Q and K only)
-  • Sliding Window Attention for local layers (layers 0–11)
+  • Sliding Window Attention for Mother (202M, 16 layers, d=768):
   • Full causal attention for global layers (layers 12–15)
 """
 import math
@@ -777,7 +777,7 @@ def test_parameter_count():
     cfg = GenesisConfig.mother()
     model = GenesisTransformer(cfg)
     n = model.count_parameters()
-    # Should be ~209M — alert if >215M or <200M
+    # Should be ~202M — alert if >215M or <195M
     assert 200_000_000 < n < 220_000_000, f"Unexpected param count: {n:,}"
     print(f"✅ Parameter count: {n:,} (~{n/1e6:.1f}M)")
 

@@ -111,7 +111,7 @@ $$\boxed{P_{\text{sweet}} \approx 277 \text{ million parameters}}$$
 
 This is achievable with:
 - `d_model = 768`, `n_heads = 12`, `n_kv_heads = 2` (GQA ratio 6:1)
-- `n_layers = 16`, `d_ff = 2048` (SwiGLU gated, effective 3072)
+- `n_layers = 16`, `d_ff = 4096` (SwiGLU gated)
 - `max_seq_len = 1024`
 - Vocabulary = 32,000 (new compact tokenizer — reduces embedding tax)
 
@@ -120,13 +120,14 @@ This is achievable with:
 | Component | Parameters |
 |---|---|
 | Token Embedding (32K × 768) | 24.6M |
-| Per-Layer Attention (Q: 768²; KV: 768×128×2; O: 768²) × 16 | 33.6M |
-| Per-Layer SwiGLU FFN (3 projections: 768→2048×2, 2048→768) × 16 | 150.9M |
+| Per-Layer Attention (Q: 768²; KV: 768×128×2; O: 768²) × 16 | 22.0M |
+| Per-Layer SwiGLU FFN (3 projections: 768→4096, 768→4096, 4096→768) × 16 | 151.0M |
 | RMSNorm params (768 × 2 per layer × 16 + 1 final) | ~25K |
+| MTP Heads (4 × [RMSNorm + 2 × 768²]) | ~4.7M |
 | LM Head (weight-tied to embedding) | 0 |
-| **Total** | **~209M** |
+| **Total** | **~202M** |
 
-With INT8 optimizer: training memory ≈ **6 × 209M × 1 byte + 369MB act + 800MB overhead ≈ 2.42 GB** — comfortably within budget even without gradient checkpointing.
+With INT8 optimizer: training memory ≈ **6 × 202M × 1 byte + 369MB act + 800MB overhead ≈ 2.38 GB** — comfortably within budget even without gradient checkpointing.
 
 ---
 
@@ -146,7 +147,7 @@ The Genesis Architecture — codenamed **KaramLLM v3 "Genesis"** — is built on
 
 ```
 ╔══════════════════════════════════════════════════════════════════════════╗
-║                    KaramLLM "Genesis" — 209M Parameters                  ║
+║                    KaramLLM "Genesis" — 202M Parameters                  ║
 ╠══════════════════════════════════════════════════════════════════════════╣
 ║                                                                          ║
 ║  INPUT: Token IDs  [B, T]                                                ║
@@ -261,9 +262,9 @@ mask = causal_mask(T)                          # Full lower-triangular
 **Step 4 — SwiGLU FFN (every layer):**
 ```
 x_norm = RMSNorm(x)
-gate   = SiLU(W_gate · x_norm)                # [B, T, 2048]
-up     = W_up   · x_norm                      # [B, T, 2048]
-hidden = gate ⊙ up                             # Hadamard product [B, T, 2048]
+gate   = SiLU(W_gate · x_norm)                # [B, T, 4096]
+up     = W_up   · x_norm                      # [B, T, 4096]
+hidden = gate ⊙ up                             # Hadamard product [B, T, 4096]
 x      = x + W_down · hidden                  # Project back [B, T, 768]
 ```
 
@@ -401,7 +402,7 @@ $$\text{SiLU}(z) = z \cdot \sigma(z) = \frac{z}{1 + e^{-z}}$$
 $$\sigma'(z) = \sigma(z)(1 - \sigma(z)) \Rightarrow \frac{d\,\text{SiLU}}{dz} = \sigma(z) + z\sigma(z)(1-\sigma(z))$$
 
 **Variables:**
-- $W_{\text{gate}} \in \mathbb{R}^{d_{\text{ff}} \times d}$ — gating projection, $d_{\text{ff}} = 2048$
+- $W_{\text{gate}} \in \mathbb{R}^{d_{\text{ff}} \times d}$ — gating projection, $d_{\text{ff}} = 4096$
 - $W_{\text{up}} \in \mathbb{R}^{d_{\text{ff}} \times d}$ — value projection
 - $W_{\text{down}} \in \mathbb{R}^{d \times d_{\text{ff}}}$ — output projection
 - $\odot$ — element-wise (Hadamard) product
@@ -417,9 +418,9 @@ The term $\sigma(z_i)(1 - \sigma(z_i))$ is **always positive and smooth**, meani
 
 **Parameter count per layer:**
 
-$$P_{\text{FFN}} = 2 \cdot d \cdot d_{\text{ff}} + d_{\text{ff}} \cdot d = 3 \cdot d \cdot d_{\text{ff}} = 3 \cdot 768 \cdot 2048 = 4{,}718{,}592$$
+$$P_{\text{FFN}} = 2 \cdot d \cdot d_{\text{ff}} + d_{\text{ff}} \cdot d = 3 \cdot d \cdot d_{\text{ff}} = 3 \cdot 768 \cdot 4096 = 9{,}437{,}184$$
 
-**Total FFN across 16 layers:** $16 \times 4.72M = 75.5M$ parameters.
+**Total FFN across 16 layers:** $16 \times 9.44M = 151.0M$ parameters.
 
 ---
 
@@ -518,7 +519,7 @@ For a student with capacity $C_s$ and teacher with capacity $C_t$, the optimal $
 
 $$\alpha^* = 1 - \frac{C_s}{C_t}$$
 
-For Child (50M) distilling from Mother (209M): $C_s/C_t \approx 0.24$, so $\alpha^* \approx 0.76$... but wait, this is the weight on the *soft* loss. The hard-label weight is $1 - \alpha^* = 0.24$. So optimal $\alpha_{\text{hard}} \approx 0.24$.
+For Child (50M) distilling from Mother (202M): $C_s/C_t \approx 0.25$, so $\alpha^* \approx 0.75$... but wait, this is the weight on the *soft* loss. The hard-label weight is $1 - \alpha^* = 0.25$. So optimal $\alpha_{\text{hard}} \approx 0.25$.
 
 We use 0.15 to be even more aggressive about soft-target reliance, since our children are very small and the domain corpus is tiny. The soft targets carry the structural knowledge; the hard targets provide domain grounding.
 
@@ -579,7 +580,7 @@ DPO eliminates the need to explicitly train a reward model, but still optimizes 
 
 **Why this is the highest ROI upgrade for KaramLLM:**
 
-A model's *perplexity* measures how well it models the data distribution. A model's *usefulness* to a human depends on whether it follows instructions, answers correctly, and stays on topic. DPO bridges this gap. A 209M model with DPO will produce responses that *feel* like GPT-4 even when they lack its world knowledge, because the *format and intent* of the response is calibrated.
+A model's *perplexity* measures how well it models the data distribution. A model's *usefulness* to a human depends on whether it follows instructions, answers correctly, and stays on topic. DPO bridges this gap. A 202M model with DPO will produce responses that *feel* like GPT-4 even when they lack its world knowledge, because the *format and intent* of the response is calibrated.
 
 ---
 
@@ -600,7 +601,7 @@ $$\alpha_t = \min\!\left(1, \frac{p_{\text{Mother}}(x_t | x_{<t})}{p_{\text{Chil
 
 $$\text{Speedup} = \frac{\mathbb{E}[\text{accepted}] + 1}{1 + \text{Child cost} / \text{Mother cost}}$$
 
-For Child at 50M vs Mother at 209M, $\text{Child cost}/\text{Mother cost} \approx 0.24$. With $\mathbb{E}[\text{accepted}] \approx 3.2$ (estimated 75% acceptance rate — child is distilled from Mother):
+For Child at 50M vs Mother at 202M, $\text{Child cost}/\text{Mother cost} \approx 0.25$. With $\mathbb{E}[\text{accepted}] \approx 3.2$ (estimated 75% acceptance rate — child is distilled from Mother):
 
 $$\text{Speedup} = \frac{3.2 + 1}{1 + 4 \times 0.24} = \frac{4.2}{1.96} \approx 2.1\times$$
 
@@ -722,7 +723,7 @@ The architecture has at minimum **three publishable contributions:**
 
 2. **"Model-Level Routing: A Simpler Yet Superior Alternative to Token-Level MoE Routing for Domain-Specialized Inference"** — Mathematical analysis showing constant-cost routing with competitive accuracy.
 
-3. **"KaramLLM: A 209M Parameter Living Language Model that Outperforms 1B+ Dense Models on Domain Tasks Through Dynamic Expert Specialization"** — The empirical benchmark paper after training Genesis.
+3. **"KaramLLM: A 202M Parameter Living Language Model that Outperforms 1B+ Dense Models on Domain Tasks Through Dynamic Expert Specialization"** — The empirical benchmark paper after training Genesis.
 
 These papers would be submitted to ICML, NeurIPS, or ICLR.
 
@@ -759,7 +760,7 @@ Reducing vocab from 50,257 to 32,000 saves:
 
 ```
 Dataset:         FineWeb-Edu (HuggingFace streaming, 100M tokens)
-Model:           GenesisTransformer (209M params, FP16)
+Model:           GenesisTransformer (202M params, FP16)
 Optimizer:       AdamW 8-bit (bitsandbytes-mlx or Adam with INT8 states)
   └─ lr:         6e-4 (peak), warmup 2,000 steps, cosine decay to 6e-5
   └─ betas:      (0.9, 0.95)
